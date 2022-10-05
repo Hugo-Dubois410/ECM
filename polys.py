@@ -4,18 +4,22 @@ Created on 5 juin 2017
 @author: garzol
 '''
 
-from gmpy2 import mpz, bit_mask, bit_length, gcdext, powmod
 from math import log
+from time import time
+
+from gmpy2 import mpz, bit_mask, bit_length, powmod
+
 
 class Node():
     def __init__(self,val,right=None,left=None):
         self.val = val
         self.right= right
         self.left = left
-        
+
+#Make sure the coefficients are < n
 def horner_2power(x, polynomial):
     result = mpz(0)
-    for i,coefficient in enumerate(polynomial[::-1]):
+    for i,coefficient in enumerate(polynomial):
         result ^= (coefficient<<(x*i))
     return result
 
@@ -26,14 +30,15 @@ def mul_kronecker(p,q,n):
     A = horner_2power(numbits,p)
     B = horner_2power(numbits,q)
     R = A*B
-    res = list()
+    i = len(p)+len(q)-2
+    res = [0]*(i+1)
     mask = bit_mask(numbits)
+    i = 0
     while R > 0:
-        res.append((R & mask )% n )
+        res[i] = (R & mask )% n 
+        i += 1
         R >>= numbits
-    rem = len(p)+len(q)-len(res)-1
-    res += [mpz(0)]*rem
-    return res[::-1] 
+    return res
 
 def minus(p,q,n):
     if len(p)<len(q) : return [(coeff1-coeff2)%n for (coeff1,coeff2) in zip(p+[mpz(0)]*(len(q)-len(p)),q)]
@@ -46,25 +51,47 @@ def inverse(B,t,n):
     if t&1: t0 = (t>>1)+1
     else:   t0 = t>>1
     B0 = inverse(B,t0,n)
-    m = mul(B0,B,n)[:t]
+    m = mul(B0,B[:t],n)[:t]
     m[0]-=1
     m1 = mul(m,B0,n)[:t]
     return minus(B0,m1,n)
 
+def newton_inv(B,t,n):
+    r = int(log(t,2))+1
+    res = [1]
+    for i in range(1,r+1):
+        g2 = mul(res,res,n)
+        res = minus([(2*k%n) for k in res], mul(B[:(1<<i)], g2, n), n)[:(1<<i)]
+    return res[:t]
+'''
+def newton_schonhage(g,f,s,n):
+    if s%2==0:
+        m = t = s//2
+        eta = 2
+    else:
+        m = s//2
+        t = m+1
+        eta = 1
+    s1, m1 , t1 = 1<<s, 1<<m , 1<<t
+    P_ = []
+    Q_ = []
+    j = 0
+    for i in range(0,s1,m1):
+        P_.append(mulX(g[i:i+m1],j,2*m1))
+        Q_.append(mulX(f[i:i+m1],j,2*m1))
+        j+=eta
+    a = DFT(g,t1,2*eta,2*m1,n)
+    return []
+'''
 
 def rem(p,B,n):
     Br_inv = inverse(B[::-1],len(p)-len(B)+1,n)
     Dr = mul(p[::-1],Br_inv,n)[:len(p)-len(B)+1]
     return minus(p,mul(Dr[::-1],B,n),n)[:len(B)-1]
 
-'''
-That was an attempt to implement the "scaled remainder trees" from Bernstein paper
-(replace inversions by multiplications) but there were no speedups
-
 def rem_from_inv(p,B,Br_inv,n):
-    Dr = mul(p[::-1],Br_inv[:len(p)-len(B)+1],n)[:len(p)-len(B)+1]
+    Dr = mul(p[::-1], Br_inv, n)[:len(p)-len(B)+1]
     return minus(p,mul(Dr[::-1],B,n),n)[:len(B)-1]
-'''
 
 def precompute(n,val):
     d = len(val)
@@ -79,11 +106,17 @@ def precompute(n,val):
         return Node(mul(right.val,left.val,n),right,left)
 
         
-def prod_multi_eval(p,n,val):
-    polys = precompute( n, val)
+def prod_multi_eval(p,n,polys,F_inv,val):
+    time2 = time()
     F = polys.val
     #inv_F = inverse(F[::-1],len)
-    return prod_multi_eval_(rem(p,F,n), n, val,polys)
+    H = rem_from_inv(p, F, F_inv,n)
+    time3 = time()
+    print("Reducing G mod F took ",(time3-time2)*1000,"ms")
+    res = prod_multi_eval_(H, n, val,polys)
+    time4 = time()
+    print("Computing polyeval took ",(time4-time3)*1000,"ms")
+    return res
 
 def prod_multi_eval_(p,n,val,polys):
     d = len(val)
@@ -100,10 +133,16 @@ def prod_multi_eval_(p,n,val,polys):
     polys.right = None
     return (h1*h2)%n
     
-def poly_from_roots(roots,n):
+def poly_from_roots(roots,B,Br_inv, n):
     if len(roots) == 1 : return [n-roots[0],1]
     d = len(roots)>>1
-    return mul(poly_from_roots(roots[d:], n),poly_from_roots(roots[:d], n),n)
+    P = poly_from_roots(roots[d:],B,Br_inv ,n)
+    if len(P)>=len(B):
+        P = rem_from_inv(P, B, Br_inv,n)
+    Q = poly_from_roots(roots[:d],B,Br_inv,n)
+    if len(Q)>=len(B):
+        Q = rem_from_inv(Q,B,Br_inv,n)
+    return mul(P,Q,n)
 
 def dickson(n,x):
     prev, cur = x, x*x+2
@@ -136,22 +175,17 @@ schonhage-strassen polynomial multiplication algorithm in the ring R = Z/nZ
 
 '''
 Multiply a polynomial P by the power of a principal root of unity x^k
-ALmost like a cyclic shift
+Almost like a cyclic shift
 '''
 def mulX(P,k,M):
     if P == []: return [0]*M
     if len(P)<M:
         P+=[0]*(M-len(P))
     t,kb = k//M, k%M
-    if kb==0:
-        if t%2==1:
-            return [-x for x in P]
-        else:
-            return P
     if t%2==0:
-        return [-x for x in P[M-kb:]]+P[:M-kb]
+        return [-x for x in P[M-kb:M]]+P[:M-kb]
     else:
-        return P[M-kb:]+[-x for x in P[:M-kb]]
+        return P[M-kb:M]+[-x for x in P[:M-kb]]
 
 '''
 Returns P mod X^m+1
@@ -224,15 +258,14 @@ def fast_convolution(P,Q,k,w,M,m,n):
     invk = powmod(inv2,int(log(k,2)),n)
     return [[(invk*c)%n for c in p] for p in DFT(res,2*M-w,M,k,n)]
 
-
 def mul(P,Q,n):
     resLen = len(P)+len(Q)-1
-    if resLen<2000: return mul_kronecker(P, Q, n)
     recurLen = (resLen-1).bit_length()
     return schon_strass_recur(P, Q, recurLen,n)[:resLen]
 
+
 def schon_strass_recur(P,Q,s,n):
-    if s<15:
+    if s<10:
         return remn1(mul_kronecker(P,Q,n),1<<s,n)
     if s%2==0:
         m = t = s//2
@@ -241,7 +274,8 @@ def schon_strass_recur(P,Q,s,n):
         m = s//2
         t = m+1
         eta = 1
-    s1, m1 , t1 = 1<<s, 1<<m , 1<<t
+    
+    s1,m1,t1 = 1<<s, 1<<m, 1<<t
     P_ = []
     Q_ = []
     j = 0
@@ -263,3 +297,29 @@ def schon_strass_recur(P,Q,s,n):
     res2[z:z+m1] = res[-1][m1:]
     return remn1(res2,s1,n)
 
+class CachedFFT():
+    def __init__(self,P,s,n):
+        self.s = s
+        self.s1 = 1<<s
+        if s<10:
+            self.P = P
+            return
+        if s%2==0:
+            self.m = self.t = s//2
+            self.eta = 2
+        else:
+            self.m = s//2
+            self.t = self.m+1
+            self.eta = 1
+        self.m1,self.t1 = 1<<self.m, 1<<self.t
+        P_ = []
+        j = 0
+        for i in range(0,self.s1,self.m1):
+            P_.append(mulX(P[i:i+self.m1],j,2*self.m1))
+            j+=self.eta
+        self.transforms = []
+        for poly in DFT(P_, 2*self.eta, 2*self.m1, self.t1, n):
+            self.transforms.append(CachedFFT(poly,self.m+1,n))
+
+
+    

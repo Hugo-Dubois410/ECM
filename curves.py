@@ -2,6 +2,7 @@
 
 from gmpy2 import gcdext
 
+
 def invert(xs,n):
     y = xs[0]
     cs = [y]

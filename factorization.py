@@ -11,11 +11,13 @@ from math import log, sqrt
 from random import randint
 from time import time
 
-from curves import EllCurveEdwards
 from gmpy2 import gcd, mpz, gcdext
+
+from curves import EllCurveEdwards
 from miller_rabin import probablyPrime
 from parallel import parallelize
-from polys import prod_multi_eval, poly_from_roots, diff_tab_dickson
+from polys import prod_multi_eval, poly_from_roots, diff_tab_dickson, precompute, \
+    inverse, CachedFFT
 
 
 def sieve(n):
@@ -26,12 +28,11 @@ def sieve(n):
             sieve[i*i::2*i]=[False]*((n-i*i-1)//(2*i)+1)
     return [2] + [i for i in range(3,n,2) if sieve[i]]
 
-
 def step1(curve,Q,n,B1,primes):
-    startt = time()
+    time1 = time()
     for p in primes:
         if p>B1:
-            print("step1 took",1000*(time()-startt),"ms")
+            print("step 1 : ",(time()-time1)*1000, "ms")
             return Q
         w = int(log(int(B1),p))
         for _ in range(w):
@@ -39,13 +40,14 @@ def step1(curve,Q,n,B1,primes):
         g = gcd(Q[0],n)
         if g != 1 : 
             return g
-    print("step1 took",1000*(time()-startt),"ms")
+    print("step 1 : ",(time()-time1)*1000, "ms")
     return Q
 
 def step2(curve, Q, B1, B2, deg_dickson):
-    tstart=time()
-    d = 6*int(sqrt(B2)//6)
+    # x1.4 to "simulate" stage 2 blocks with k=2. We are very lazy
+    d = 6*int(sqrt(B2)//(6*1.4))
     vec = diff_tab_dickson(int((B1//d)*d), deg_dickson, d)
+    time2 = time()
     for i in range(len(vec)):
         t = curve.mul(vec[i],Q)
         if t[2]>1:
@@ -57,7 +59,10 @@ def step2(curve, Q, B1, B2, deg_dickson):
         if not isinstance(vec, list):
             return vec
         sigmas.append(vec[0][0])
+    time3 = time()
+    print("Computing roots of G took ",(time3-time2)*1000,"ms")
     vec = diff_tab_dickson(1,deg_dickson,6)
+    time4 = time()
     for i in range(len(vec)):
         t = curve.mul(vec[i],Q)
         if t[2]>1:
@@ -70,14 +75,25 @@ def step2(curve, Q, B1, B2, deg_dickson):
             return vec
         if gcd(j,d) == 1: 
             taus.append(vec[0][0])
-    polynomial = poly_from_roots(sigmas,curve.n)
-    g = gcd(prod_multi_eval(polynomial, curve.n, taus),curve.n)
-    print("step2 took",1000*(time()-tstart),"ms")
+    time5 = time()
+    print("Computing roots of F took ",(time5-time4)*1000,"ms")
+    polys = precompute(curve.n,taus)
+    B =polys.val
+    time6 = time()
+    print("Building F from its roots took ",(time6-time5)*1000,"ms")
+    Br_inv = inverse(B[::-1],len(B)-1,curve.n)
+    time7 = time()
+    print("Computing 1/F took ",(time7-time6)*1000,"ms")
+    polynomial = poly_from_roots(sigmas,B,Br_inv,curve.n)
+    time8 = time()
+    print("Building G from its roots took ",(time8-time7)*1000,"ms")
+    pme = prod_multi_eval(polynomial, curve.n,polys,Br_inv,taus)
+    g = gcd(pme,curve.n)
     return g
 
 
-
 def try_factor(n,B,primes,B2):
+    timethen = time()
     x ,y = mpz(randint(0,n-1)), mpz(randint(0,n-1))
     g1, a,_ = gcdext(x,n)
     g2,b,_  = gcdext(y,n)
@@ -91,10 +107,13 @@ def try_factor(n,B,primes,B2):
     Q = step1(curve,P,n,B,primes)
     if not isinstance(Q,list):
         return Q
+    time1 = time()
+    #print("step 1 took ",(time1-timethen)*1000," ms")
     WCurve = curve.toWeierstrass(Q)
     if not isinstance(WCurve,list):
         return WCurve
     ret = step2(WCurve[0],WCurve[1],B,B2,30)
+    #print("step 2 took ",(time()-time1)*1000," ms")
     return ret
 
 
@@ -127,6 +146,9 @@ def factor(n,primes,nProc,B1,B2):
                 else :  k = try_factor(n,B1,primes,B2)
             print("found a factor:",k,"\n")
             contenders.append(k)
-            contenders.append(n//k)
+            n//=k
+            while n%k==0:
+                n//=k
+            contenders.append(n)
     return champs
     

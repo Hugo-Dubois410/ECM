@@ -25,9 +25,9 @@ def get_arg(n):
 def main():
     print("\nECM Factoring method using python3 and gmpy2")
     PRIMES = sieve(120000000)
-    nProc = 4
-    B1 = 30000
-    B2 = 45000000
+    nProc = 1
+    B1 = 100000
+    B2 = 450000000
     print("B1 =",B1)
     print("B2 =",B2)
     print("Number of parallel curves:",nProc)
